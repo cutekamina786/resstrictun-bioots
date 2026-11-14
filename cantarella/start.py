@@ -194,15 +194,24 @@ async def copy_public_message(client, message, chat, msgid):
             message_id=msgid,
             reply_to_message_id=message.id
         )
-async def is_empty_or_service(client, chat, msgid):
-    """True when the id is a deleted / non-existing message or a service message
-    (user joined, pinned, title changed ...). Those are very common inside
-    groups and must simply be skipped, not treated as 'login required'."""
+async def probe_message(client, chat, msgid):
+    """What does the BOT see at this id?  Returns:
+       "ok"      -> a real message (bot can read this chat)
+       "service" -> a real service message (joined / pinned / topic created ...)
+       "empty"   -> Telegram returned an empty message. IMPORTANT: for a group the bot has NOT
+                    joined this also means "bot is not allowed to read it", so it is NOT
+                    proof that the message was deleted.
+       "error"   -> the bot cannot access the chat at all
+    """
     try:
         m = await client.get_messages(chat, msgid)
-        return bool(getattr(m, "empty", False) or getattr(m, "service", None))
     except Exception:
-        return False
+        return "error"
+    if m is None or getattr(m, "empty", False):
+        return "empty"
+    if getattr(m, "service", None):
+        return "service"
+    return "ok"
 async def send_non_file_message(client, chat_id, msg, msg_type):
     """Re-create poll / contact / location / venue / dice messages."""
     try:
@@ -228,8 +237,10 @@ async def send_non_file_message(client, chat_id, msg, msg_type):
             await client.send_location(chat_id, msg.location.latitude, msg.location.longitude)
         elif msg_type == "Dice":
             await client.send_dice(chat_id, emoji=msg.dice.emoji)
+        return True
     except Exception as e:
         logger.error(f"Non-file message ({msg_type}) could not be sent: {e}")
+        return False
 # --------------------------------------------------------
 # Robust Telegram link parser (public / private / batch)
 # Handles links even when surrounded by extra text/spaces,
@@ -463,6 +474,9 @@ async def save(client: Client, message: Message):
         batch_temp.IS_BATCH[message.from_user.id] = False
         is_private_link = kind == "private"
         is_public_link = kind == "public"
+        delivered = 0          # how many messages were really delivered
+        notified = False       # an error / info message was already shown to the user
+        bot_can_read = False   # the bot itself can read this public chat (so "empty" = really deleted)
         for msgid in range(fromID, toID + 1):
            
             if batch_temp.IS_BATCH.get(message.from_user.id):
@@ -472,18 +486,23 @@ async def save(client: Client, message: Message):
                 # Public channel OR public group (users' messages + anonymous/"as group" messages)
                 try:
                     sent = await copy_public_message(client, message, target, msgid)
-                    if sent:
-                        await db.add_traffic(message.from_user.id)
-                        await asyncio.sleep(1)
-                        continue
-                    # nothing was copied: deleted / service message -> skip it quietly
-                    if await is_empty_or_service(client, target, msgid):
-                        continue
                 except Exception as e:
-                    # deleted / service messages inside groups: skip, never ask for login for them
-                    if await is_empty_or_service(client, target, msgid):
-                        continue
-                # otherwise (protected / restricted content) -> fall through to the login (download & upload) flow
+                    sent = None
+                if sent:
+                    bot_can_read = True
+                    delivered += 1
+                    await db.add_traffic(message.from_user.id)
+                    await asyncio.sleep(1)
+                    continue
+                state = await probe_message(client, target, msgid)
+                if state == "service":
+                    continue                     # real service message: nothing to forward
+                if state == "ok":
+                    bot_can_read = True          # readable but not copyable (protected) -> login flow below
+                elif state == "empty" and bot_can_read:
+                    continue                     # bot reads this chat fine, so this id is really deleted
+                # "empty" first-time / "error": the bot cannot read this chat (typical for groups the
+                # bot has not joined) -> let the logged-in account fetch it (download & upload flow)
             user_data = await db.get_session(message.from_user.id)
             if user_data is None:
                 await message.reply(
@@ -512,10 +531,31 @@ async def save(client: Client, message: Message):
                 await acc.disconnect()
             except Exception:
                 pass
-            if result is False:
+            if result is True:
+                delivered += 1
+            elif result == "notified":
+                notified = True
+            elif result is False:
+                notified = True
                 break  # chat itself is not reachable with this account: stop the range instead of repeating the same error
             await asyncio.sleep(1)  # Turbo: shorter gap between consecutive saves
+        was_cancelled = batch_temp.IS_BATCH.get(message.from_user.id) is True
         batch_temp.IS_BATCH[message.from_user.id] = True
+        if delivered == 0 and not notified and not was_cancelled:
+            # never stay silent
+            try:
+                await message.reply_text(
+                    "<b>ℹ️ Nothing to Save Here</b>\n\n"
+                    "<i>This link has no content: the message was deleted, or it is only a service / "
+                    "topic-header message (in forum groups the number right after the group name can be a topic id).</i>\n\n"
+                    "<b>Send a message link instead:</b>\n"
+                    "<code>https://t.me/group/1362</code>\n"
+                    "<code>https://t.me/group/1359/1362</code> <i>(topic 1359, message 1362)</i>\n"
+                    "<code>https://t.me/group/1362-1370</code> <i>(range)</i>",
+                    parse_mode=enums.ParseMode.HTML
+                )
+            except Exception:
+                pass
 async def handle_restricted_content(client: Client, acc, message: Message, chat_target, msgid):
     try:
         msg: Message = await acc.get_messages(chat_target, msgid)
@@ -562,15 +602,16 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
                 reply_markup=btn,
                 parse_mode=enums.ParseMode.HTML
             )
-            return
+            return "notified"
     if msg_type == "Text":
         try:
             await client.send_message(message.chat.id, msg.text, entities=msg.entities, parse_mode=enums.ParseMode.HTML)
-            return
+            return True
         except:
             return
     if msg_type in NON_FILE_TYPES:
-        await send_non_file_message(client, message.chat.id, msg, msg_type)
+        if await send_non_file_message(client, message.chat.id, msg, msg_type):
+            return True
         return
     await db.add_traffic(message.from_user.id)
     smsg = await client.send_message(message.chat.id, '<b>⬇️ Starting Download...</b>', reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
@@ -591,8 +632,16 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
     except Exception as e:
         if batch_temp.IS_BATCH.get(message.from_user.id) or "Cancelled" in str(e):
             if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
-            return await smsg.edit("❌ **Task Cancelled**")
-        return await smsg.delete()
+            await smsg.edit("❌ **Task Cancelled**")
+            return "notified"
+        # do not fail silently: tell the user why the download did not work
+        try:
+            await smsg.edit(f"<b>❌ Download Failed</b>\n<code>{_html.escape(str(e))[:300]}</code>", parse_mode=enums.ParseMode.HTML)
+        except Exception:
+            pass
+        return "notified"
+    uploaded = False
+    upload_error = None
     try:
         asyncio.create_task(upstatus(client, f'{message.id}upstatus.txt', smsg, message.chat.id))
        
@@ -640,12 +689,25 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
             await client.send_animation(message.chat.id, file, duration=msg.animation.duration or 0, width=msg.animation.width or 0, height=msg.animation.height or 0, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
         elif msg_type == "Sticker":
             await client.send_sticker(message.chat.id, file)
+        uploaded = True
        
     except Exception as e:
-         await smsg.edit(f"Upload Failed: {e}")
+         upload_error = e
+         try:
+             await smsg.edit(f"Upload Failed: {e}")
+         except Exception:
+             pass
     if os.path.exists(f'{message.id}upstatus.txt'): os.remove(f'{message.id}upstatus.txt')
     if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
     await client.delete_messages(message.chat.id, [smsg.id])
+    if uploaded:
+        return True
+    try:
+        # the status message above is deleted, so keep the reason visible
+        await client.send_message(message.chat.id, f"<b>❌ Upload Failed</b>\n<code>{_html.escape(str(upload_error))[:300]}</code>", parse_mode=enums.ParseMode.HTML)
+    except Exception:
+        pass
+    return "notified"
 @Client.on_callback_query()
 async def button_callbacks(client: Client, callback_query: CallbackQuery):
     data = callback_query.data
