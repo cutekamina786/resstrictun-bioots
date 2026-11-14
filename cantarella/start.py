@@ -9,6 +9,7 @@ import shutil
 import pyrogram
 import requests
 import hashlib 
+import html as _html
 from pyrogram import Client, filters, enums
 from pyrogram.errors import (
     FloodWait, UserIsBlocked, InputUserDeactivated, UserAlreadyParticipant,
@@ -155,8 +156,80 @@ def get_message_type(msg):
     if getattr(msg, 'video', None): return "Video"
     if getattr(msg, 'photo', None): return "Photo"
     if getattr(msg, 'audio', None): return "Audio"
+    # --- Group content (voice notes, GIFs, stickers, round videos, polls ...) ---
+    if getattr(msg, 'voice', None): return "Voice"
+    if getattr(msg, 'video_note', None): return "VideoNote"
+    if getattr(msg, 'animation', None): return "Animation"
+    if getattr(msg, 'sticker', None): return "Sticker"
+    if getattr(msg, 'poll', None): return "Poll"
+    if getattr(msg, 'contact', None): return "Contact"
+    if getattr(msg, 'venue', None): return "Venue"
+    if getattr(msg, 'location', None): return "Location"
+    if getattr(msg, 'dice', None): return "Dice"
     if getattr(msg, 'text', None): return "Text"
     return None
+# message type -> attribute that holds the downloadable media
+FILE_MEDIA_ATTR = {
+    "Document": "document", "Video": "video", "Photo": "photo", "Audio": "audio",
+    "Voice": "voice", "VideoNote": "video_note", "Animation": "animation", "Sticker": "sticker",
+}
+# types whose Telegram-side thumbnail we can reuse
+THUMB_TYPES = ("Video", "Document", "Animation", "VideoNote", "Audio")
+# messages that have no file: they are re-created by the bot, nothing to download
+NON_FILE_TYPES = ("Poll", "Contact", "Venue", "Location", "Dice")
+async def copy_public_message(client, message, chat, msgid):
+    """Copy one post of a public channel/group. One FloodWait retry."""
+    try:
+        return await client.copy_message(
+            chat_id=message.chat.id,
+            from_chat_id=chat,
+            message_id=msgid,
+            reply_to_message_id=message.id
+        )
+    except FloodWait as fw:
+        await asyncio.sleep(int(fw.value) + 1)
+        return await client.copy_message(
+            chat_id=message.chat.id,
+            from_chat_id=chat,
+            message_id=msgid,
+            reply_to_message_id=message.id
+        )
+async def is_empty_or_service(client, chat, msgid):
+    """True when the id is a deleted / non-existing message or a service message
+    (user joined, pinned, title changed ...). Those are very common inside
+    groups and must simply be skipped, not treated as 'login required'."""
+    try:
+        m = await client.get_messages(chat, msgid)
+        return bool(getattr(m, "empty", False) or getattr(m, "service", None))
+    except Exception:
+        return False
+async def send_non_file_message(client, chat_id, msg, msg_type):
+    """Re-create poll / contact / location / venue / dice messages."""
+    try:
+        if msg_type == "Poll":
+            poll = msg.poll
+            options = [str(o.text) for o in poll.options]
+            try:
+                kwargs = dict(is_anonymous=poll.is_anonymous, allows_multiple_answers=bool(poll.allows_multiple_answers))
+                if str(getattr(poll.type, "name", poll.type)).upper() == "QUIZ" and poll.correct_option_id is not None:
+                    kwargs.update(type=poll.type, correct_option_id=poll.correct_option_id)
+                await client.send_poll(chat_id, str(poll.question), options, **kwargs)
+            except Exception:
+                # quiz without a known answer etc. -> keep the content as plain text
+                txt = f"📊 {_html.escape(str(poll.question))}\n" + "\n".join(f"• {_html.escape(o)}" for o in options)
+                await client.send_message(chat_id, txt, parse_mode=enums.ParseMode.HTML)
+        elif msg_type == "Contact":
+            c = msg.contact
+            await client.send_contact(chat_id, c.phone_number, c.first_name, last_name=c.last_name, vcard=c.vcard)
+        elif msg_type == "Venue":
+            v = msg.venue
+            await client.send_venue(chat_id, v.location.latitude, v.location.longitude, v.title, v.address)
+        elif msg_type == "Location":
+            await client.send_location(chat_id, msg.location.latitude, msg.location.longitude)
+        elif msg_type == "Dice":
+            await client.send_dice(chat_id, emoji=msg.dice.emoji)
+    except Exception as e:
+        logger.error(f"Non-file message ({msg_type}) could not be sent: {e}")
 # --------------------------------------------------------
 # Robust Telegram link parser (public / private / batch)
 # Handles links even when surrounded by extra text/spaces,
@@ -169,7 +242,7 @@ def get_message_type(msg):
 # --------------------------------------------------------
 TME_PRIVATE_RE = re.compile(r"https?://t\.me/c/(\d+)(?:/\d+)?/(\d+)(?:-(\d+))?")
 TME_BATCH_RE = re.compile(r"https?://t\.me/b/([A-Za-z0-9_]+)/(\d+)(?:-(\d+))?")
-TME_PUBLIC_RE = re.compile(r"https?://t\.me/([A-Za-z0-9_]+)/(\d+)(?:-(\d+))?")
+TME_PUBLIC_RE = re.compile(r"https?://t\.me/([A-Za-z0-9_]+)(?:/\d+)?/(\d+)(?:-(\d+))?")
 def parse_telegram_link(text):
     """
     Finds a Telegram post link anywhere inside `text` and returns
@@ -396,18 +469,21 @@ async def save(client: Client, message: Message):
                 break
            
             if is_public_link:
+                # Public channel OR public group (users' messages + anonymous/"as group" messages)
                 try:
-                    await client.copy_message(
-                        chat_id=message.chat.id,
-                        from_chat_id=target,
-                        message_id=msgid,
-                        reply_to_message_id=message.id
-                    )
-                    await db.add_traffic(message.from_user.id)
-                    await asyncio.sleep(1)
-                    continue
+                    sent = await copy_public_message(client, message, target, msgid)
+                    if sent:
+                        await db.add_traffic(message.from_user.id)
+                        await asyncio.sleep(1)
+                        continue
+                    # nothing was copied: deleted / service message -> skip it quietly
+                    if await is_empty_or_service(client, target, msgid):
+                        continue
                 except Exception as e:
-                    pass
+                    # deleted / service messages inside groups: skip, never ask for login for them
+                    if await is_empty_or_service(client, target, msgid):
+                        continue
+                # otherwise (protected / restricted content) -> fall through to the login (download & upload) flow
             user_data = await db.get_session(message.from_user.id)
             if user_data is None:
                 await message.reply(
@@ -431,11 +507,13 @@ async def save(client: Client, message: Message):
             except Exception as e:
                 batch_temp.IS_BATCH[message.from_user.id] = True
                 return await message.reply(f"<b>❌ Authentication Failed</b>\n\n<i>Your session may have expired. Please /logout and /login again.</i>\n<code>{e}</code>", parse_mode=enums.ParseMode.HTML)
-            await handle_restricted_content(client, acc, message, target, msgid)
+            result = await handle_restricted_content(client, acc, message, target, msgid)
             try:
                 await acc.disconnect()
             except Exception:
                 pass
+            if result is False:
+                break  # chat itself is not reachable with this account: stop the range instead of repeating the same error
             await asyncio.sleep(1)  # Turbo: shorter gap between consecutive saves
         batch_temp.IS_BATCH[message.from_user.id] = True
 async def handle_restricted_content(client: Client, acc, message: Message, chat_target, msgid):
@@ -463,17 +541,17 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
                 )
             except Exception:
                 pass
-            return
-    if msg.empty:
+            return False
+    # Deleted messages and service messages (joined / pinned / title changed ...) have no content
+    if msg.empty or getattr(msg, "service", None):
         return
    
     msg_type = get_message_type(msg)
     if not msg_type:
         return
     file_size = 0
-    if msg_type == "Document": file_size = msg.document.file_size
-    elif msg_type == "Video": file_size = msg.video.file_size
-    elif msg_type == "Audio": file_size = msg.audio.file_size
+    if msg_type in FILE_MEDIA_ATTR:
+        file_size = int(getattr(getattr(msg, FILE_MEDIA_ATTR[msg_type], None), "file_size", 0) or 0)
    
     if file_size > FREE_LIMIT_SIZE:
         if not await db.has_unlimited_access(message.from_user.id):
@@ -491,6 +569,9 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
             return
         except:
             return
+    if msg_type in NON_FILE_TYPES:
+        await send_non_file_message(client, message.chat.id, msg, msg_type)
+        return
     await db.add_traffic(message.from_user.id)
     smsg = await client.send_message(message.chat.id, '<b>⬇️ Starting Download...</b>', reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
    
@@ -525,10 +606,10 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
                 logger.error(f"Failed to download custom thumb: {e}")
         if not ph_path:
             try:
-                if msg_type == "Video" and msg.video.thumbs:
-                    ph_path = await acc.download_media(msg.video.thumbs[0].file_id, file_name=f"{temp_dir}/thumb.jpg")
-                elif msg_type == "Document" and msg.document.thumbs:
-                    ph_path = await acc.download_media(msg.document.thumbs[0].file_id, file_name=f"{temp_dir}/thumb.jpg")
+                if msg_type in THUMB_TYPES:
+                    _thumbs = getattr(getattr(msg, FILE_MEDIA_ATTR[msg_type], None), "thumbs", None)
+                    if _thumbs:
+                        ph_path = await acc.download_media(_thumbs[0].file_id, file_name=f"{temp_dir}/thumb.jpg")
             except:
                 pass
         custom_caption = await db.get_caption(message.from_user.id)
@@ -537,7 +618,12 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
         else:
             final_caption = script.CAPTION.format(file_name=file.split("/")[-1])
             if msg.caption:
-                final_caption += f"\n\n{msg.caption}"
+                # .html keeps the original formatting AND escapes characters like < > & (they used to break the upload)
+                try:
+                    _cap_html = msg.caption.html
+                except Exception:
+                    _cap_html = _html.escape(str(msg.caption))
+                final_caption += f"\n\n{_cap_html}"
         if msg_type == "Document":
             await client.send_document(message.chat.id, file, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
         elif msg_type == "Video":
@@ -546,6 +632,14 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
             await client.send_audio(message.chat.id, file, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
         elif msg_type == "Photo":
             await client.send_photo(message.chat.id, file, caption=final_caption)
+        elif msg_type == "Voice":
+            await client.send_voice(message.chat.id, file, duration=msg.voice.duration or 0, caption=final_caption, progress=progress, progress_args=[message, "up"])
+        elif msg_type == "VideoNote":
+            await client.send_video_note(message.chat.id, file, duration=msg.video_note.duration or 0, length=msg.video_note.length or 240, thumb=ph_path, progress=progress, progress_args=[message, "up"])
+        elif msg_type == "Animation":
+            await client.send_animation(message.chat.id, file, duration=msg.animation.duration or 0, width=msg.animation.width or 0, height=msg.animation.height or 0, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
+        elif msg_type == "Sticker":
+            await client.send_sticker(message.chat.id, file)
        
     except Exception as e:
          await smsg.edit(f"Upload Failed: {e}")
