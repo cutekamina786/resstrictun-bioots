@@ -11,6 +11,9 @@ SUPPORTED_TYPES = {"CHANNEL": "Channel", "SUPERGROUP": "Group (supergroup)", "GR
 _FATAL_ALWAYS = {
     "ChatWriteForbidden", "ChatAdminRequired", "UserBannedInChannel", "ChannelBanned",
     "UserNotParticipant", "ChatRestricted", "ChatGuestSendForbidden",
+    # the logged-in account (As User mode) is no longer usable
+    "AuthKeyUnregistered", "AuthKeyInvalid", "AuthKeyDuplicated", "SessionRevoked", "SessionExpired",
+    "UserDeactivated", "UserDeactivatedBan",
 }
 # Errors that are ambiguous when copying from a source chat (could be the source), but clearly mean
 # the target when the bot is *sending* a file it already has
@@ -35,19 +38,25 @@ def dest_error_kind(e, ambiguous_is_dest=False):
     return None
 
 
-def explain_error(e):
-    """Short, human readable English reason for a Telegram / generic error."""
+def explain_error(e, actor="bot"):
+    """Short, human readable English reason for a Telegram / generic error.
+    actor = 'bot' or 'user' (As User mode talks about 'Your account')."""
     n = _name(e)
+    who = "Your account" if actor == "user" else "The bot"
+    fix = ("Make sure your account is an admin with the 'Post Messages' permission."
+           if actor == "user" else "Make the bot an admin with the 'Post Messages' permission.")
     if n in ("ChatWriteForbidden", "ChatAdminRequired", "ChatRestricted", "ChatGuestSendForbidden"):
-        return ("The bot is not allowed to post in the target chat. Make the bot an admin "
-                "with the 'Post Messages' permission.")
+        return f"{who} is not allowed to post in the target chat. {fix}"
     if n in ("UserBannedInChannel", "ChannelBanned"):
-        return "The bot is banned or restricted in the target chat."
+        return f"{who} is banned or restricted in the target chat."
     if n == "UserNotParticipant":
-        return "The bot is not a member of the target chat any more."
+        return f"{who} is not a member of the target chat any more."
     if n in ("ChannelPrivate", "ChannelInvalid", "PeerIdInvalid", "ChatIdInvalid"):
-        return ("The target chat is not accessible. The bot was removed from it, "
+        return (f"The target chat is not accessible. {who} was removed from it, "
                 "or the chat ID is wrong.")
+    if n in ("AuthKeyUnregistered", "AuthKeyInvalid", "AuthKeyDuplicated", "SessionRevoked",
+             "SessionExpired", "UserDeactivated", "UserDeactivatedBan"):
+        return "Your login session is no longer valid. Use /logout and then /login again."
     if n.startswith("ChatSend") and n.endswith("Forbidden"):
         return "This content type is blocked in the target chat by its permissions."
     if n in ("FloodWait", "SlowmodeWait"):
@@ -278,4 +287,194 @@ def format_report(rep, saved=None):
                      "Progress and errors stay here in the bot. Use /setchat clear to turn it off.</i>")
     elif saved is False:
         lines.append("\n<i>Fix the problem above and run /setchat again.</i>")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------------------
+# Forwarding mode (As Bot / As User)
+# --------------------------------------------------------------------------------------
+pending_forward = {}   # user_id -> [Message, ...] links waiting for the user to choose a forwarding mode
+
+FWD_EXPLAIN = (
+    "🤖 <b>As Bot</b>: the bot sends the content into your target chat. "
+    "The bot must be an admin there.\n"
+    "👤 <b>As User</b>: your logged-in account (/login) sends it. You must be logged in and be an "
+    "admin with permission to post in the target chat (normal or anonymous admin)."
+)
+FWD_ASK = (
+    "<b>📤 How do you want to forward?</b>\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "Your target chat is set. Choose how the content should be sent there:\n\n"
+    + FWD_EXPLAIN +
+    "\n\n<i>Your choice is saved for all future links. Change it any time with /setforwarding.</i>"
+)
+
+
+def mode_label(mode):
+    return {"bot": "As Bot", "user": "As User"}.get(mode, "Not chosen yet")
+
+
+def fwd_buttons(prefix):
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("As Bot", callback_data=f"{prefix}_bot"),
+        InlineKeyboardButton("As User", callback_data=f"{prefix}_user"),
+    ]])
+
+
+async def inspect_user_target(acc, candidates):
+    """Same idea as inspect_target, but for the logged-in USER account (As User mode).
+    The account must be admin/owner of the chat (channel: with 'Post Messages'). Never raises."""
+    rep = {"ok": False, "chat_id": None, "title": None, "type_label": None, "user_status": None,
+           "anonymous": False, "problems": [], "warnings": []}
+    chat, last = None, None
+    for ref in candidates:
+        try:
+            chat = await acc.get_chat(ref)
+            tname = str(getattr(chat.type, "name", chat.type)).upper()
+            if tname in SUPPORTED_TYPES or ref == candidates[-1]:
+                break
+            chat = None
+        except Exception as e:
+            last = e
+            chat = None
+    if chat is None:
+        if last is not None and _name(last) in ("UsernameNotOccupied", "UsernameInvalid"):
+            rep["problems"].append("No chat exists with that username.")
+        else:
+            rep["problems"].append("Your logged-in account cannot see this chat. The ID may be wrong, or your "
+                                   "account is not a member of it.")
+        return rep
+    rep["chat_id"] = chat.id
+    rep["title"] = getattr(chat, "title", None) or "Unknown"
+    tname = str(getattr(chat.type, "name", chat.type)).upper()
+    rep["type_label"] = SUPPORTED_TYPES.get(tname, tname.title())
+    if tname not in SUPPORTED_TYPES:
+        rep["problems"].append("Only channels and groups can be used as a target.")
+        return rep
+    is_channel = tname == "CHANNEL"
+    try:
+        me = await acc.get_me()
+        cm = await acc.get_chat_member(chat.id, me.id)
+    except Exception as e:
+        if "NotParticipant" in _name(e):
+            rep["user_status"] = "NOT A MEMBER"
+            rep["problems"].append("Your logged-in account is not a member of this chat.")
+        else:
+            rep["problems"].append("Could not read your status in this chat: " + explain_error(e, "user"))
+        return rep
+    st = _status(cm)
+    rep["user_status"] = st
+    if st == "OWNER":
+        pass
+    elif st == "ADMINISTRATOR":
+        priv = getattr(cm, "privileges", None)
+        rep["anonymous"] = bool(getattr(priv, "is_anonymous", False))
+        if is_channel and priv is not None and getattr(priv, "can_post_messages", True) is False:
+            rep["problems"].append("Your account is an admin but the 'Post Messages' permission is OFF.")
+    else:
+        rep["problems"].append(f"Your logged-in account is not an admin of this chat (status: {st.title()}). "
+                               "Make it an admin with the 'Post Messages' permission.")
+    rep["ok"] = not rep["problems"]
+    return rep
+
+
+async def check_user_target(user_data, candidates):
+    """Open the saved login session, check the chat, close it. Never raises."""
+    from pyrogram import Client
+    from config import API_ID, API_HASH
+    acc = None
+    try:
+        acc = Client("saverestricted", session_string=user_data, api_hash=API_HASH, api_id=API_ID, in_memory=True)
+        await acc.connect()
+    except Exception as e:
+        return {"ok": False, "chat_id": None, "title": None, "type_label": None, "user_status": None,
+                "anonymous": False, "warnings": [],
+                "problems": ["Your login session is not valid. Use /logout and then /login again. "
+                             f"({explain_error(e, 'user')})"]}
+    try:
+        return await inspect_user_target(acc, candidates)
+    except Exception as e:
+        return {"ok": False, "chat_id": None, "title": None, "type_label": None, "user_status": None,
+                "anonymous": False, "warnings": [], "problems": [explain_error(e, "user")]}
+    finally:
+        try:
+            await acc.disconnect()
+        except Exception:
+            pass
+
+
+_UPRE_CACHE = {}
+
+
+async def user_preflight(uid, user_data, chat_id, ttl=60):
+    key = (uid, chat_id)
+    hit = _UPRE_CACHE.get(key)
+    now = time.time()
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    rep = await check_user_target(user_data, [chat_id])
+    if rep["ok"]:
+        _UPRE_CACHE[key] = (now, rep)
+    else:
+        _UPRE_CACHE.pop(key, None)
+    return rep
+
+
+def forget_user_preflight(uid=None):
+    if uid is None:
+        _UPRE_CACHE.clear()
+    else:
+        for k in [k for k in _UPRE_CACHE if k[0] == uid]:
+            _UPRE_CACHE.pop(k, None)
+
+
+def format_dual_report(bot_rep, user_rep, logged_in, saved=None, mode=None):
+    """/setchat report: shows BOTH ways of forwarding (As Bot / As User)."""
+    base = bot_rep if bot_rep.get("chat_id") is not None else (user_rep or {})
+    if saved is True:
+        head = "✅ <b>Target Chat Saved</b>"
+    elif saved is False:
+        head = "❌ <b>Target Chat NOT Saved</b>"
+    else:
+        head = "🎯 <b>Target Chat Status</b>"
+    lines = [head, "━━━━━━━━━━━━━━━━━━"]
+    if base.get("chat_id") is not None:
+        lines.append(f"<b>Title:</b> {esc(base['title'])}")
+        lines.append(f"<b>Chat ID:</b> <code>{base['chat_id']}</code>")
+        lines.append(f"<b>Type:</b> {esc(base['type_label'])}")
+    lines.append("")
+    # ---- As Bot
+    if bot_rep.get("ok"):
+        extra = ", test message OK" if bot_rep.get("test") else ""
+        lines.append(f"🤖 <b>As Bot:</b> ✅ Ready (bot is admin{extra})")
+    else:
+        lines.append("🤖 <b>As Bot:</b> ❌ Not ready")
+        for p in bot_rep.get("problems", []):
+            lines.append(f"   • <i>{esc(p)}</i>")
+    for w in bot_rep.get("warnings", []):
+        lines.append(f"   ⚠️ <i>{esc(w)}</i>")
+    # ---- As User
+    if not logged_in:
+        lines.append("👤 <b>As User:</b> ➖ Not logged in (use /login to enable this mode)")
+    elif user_rep and user_rep.get("ok"):
+        who = "owner" if user_rep.get("user_status") == "OWNER" else "admin"
+        anon = ", anonymous admin" if user_rep.get("anonymous") else ""
+        lines.append(f"👤 <b>As User:</b> ✅ Ready (you are {who}{anon})")
+    else:
+        lines.append("👤 <b>As User:</b> ❌ Not ready")
+        for p in (user_rep or {}).get("problems", []):
+            lines.append(f"   • <i>{esc(p)}</i>")
+    lines.append("")
+    lines.append(f"<b>Forwarding mode:</b> {mode_label(mode)}")
+    if saved is True:
+        if mode is None:
+            lines.append("<i>Send a link and I will ask how to forward. You can also use /setforwarding.</i>")
+        elif mode == "bot" and not bot_rep.get("ok"):
+            lines.append("<i>⚠️ Your mode is As Bot but the bot is not ready. Fix it, or switch with /setforwarding.</i>")
+        elif mode == "user" and not (user_rep and user_rep.get("ok")):
+            lines.append("<i>⚠️ Your mode is As User but your account is not ready. Fix it, or switch with /setforwarding.</i>")
+        lines.append("<i>Progress and errors always stay here in the bot. /setchat clear turns forwarding off.</i>")
+    elif saved is False:
+        lines.append("<i>Neither mode works yet. Fix the problems above and run /setchat again.</i>")
     return "\n".join(lines)

@@ -82,6 +82,7 @@ COMMANDS_TXT = """<b>📜 All Available Commands</b>
 /setchat &lt;chat_id or @username&gt; — Set target chat (verified)
 /setchat check — Re-check target chat
 /setchat clear — Remove target chat
+/setforwarding — Choose As Bot / As User
 </blockquote>
 
 <b>✍️ Caption</b>
