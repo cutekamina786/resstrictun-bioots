@@ -79,8 +79,9 @@ COMMANDS_TXT = """<b>📜 All Available Commands</b>
 
 <b>📤 Dump Chat</b>
 <blockquote>
-/setchat &lt;chat_id&gt; — Set forward destination
-/setchat clear — Remove dump chat
+/setchat &lt;chat_id or @username&gt; — Set target chat (verified)
+/setchat check — Re-check target chat
+/setchat clear — Remove target chat
 </blockquote>
 
 <b>✍️ Caption</b>

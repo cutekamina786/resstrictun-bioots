@@ -3,6 +3,10 @@ from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from database.db import db
 from cantarella.strings import COMMANDS_TXT
+from config import OWNER_ID
+from cantarella.targetchat import (
+    parse_target_input, inspect_target, format_report, forget_preflight, esc
+)
 # ======================================================
 # /settings - Enhanced Professional Settings Menu
 # ======================================================
@@ -48,44 +52,61 @@ async def direct_commands(client: Client, message: Message):
         disable_web_page_preview=True
     )
 # ======================================================
-# /setchat - Set or Clear Dump Chat
+# /setchat - Set / Check / Clear the target chat (channel or group)
 # ======================================================
 @Client.on_message(filters.command("setchat") & filters.private)
 async def set_dump_chat(client: Client, message: Message):
     user_id = message.from_user.id
     if not await db.is_user_exist(user_id):
         await db.add_user(user_id, message.from_user.first_name)
+    current = await db.get_dump_chat(user_id)
     if len(message.command) < 2:
-        return await message.reply_text(
-            "<b>🗑 Set Dump Chat</b>\n\n"
+        text = (
+            "<b>🎯 Set Target Chat</b>\n\n"
             "<b>Usage:</b>\n"
-            "<code>/setchat &lt;chat_id&gt;</code> → Set forward destination\n"
-            "<code>/setchat clear</code> → Remove dump chat\n\n"
-            "<i>Example: /setchat -1001234567890</i>",
-            parse_mode=enums.ParseMode.HTML
+            "<code>/setchat -1001234567890</code> → chat ID\n"
+            "<code>/setchat @mychannel</code> → public @username\n"
+            "<code>/setchat check</code> → re-check your current target\n"
+            "<code>/setchat clear</code> → turn it off\n\n"
+            "<b>Requirements:</b>\n"
+            "• The bot must be added to the channel/group (admin with <i>Post Messages</i> for channels)\n"
+            "• You must be an admin/owner of that chat\n\n"
+            "<i>Once set, every link you send is forwarded into that chat. "
+            "Progress, completion and errors are shown here in the bot.</i>\n\n"
         )
-    arg = message.command[1].strip().lower()
-    if arg == "clear":
+        text += (f"<b>Current target:</b> <code>{current}</code>" if current else "<b>Current target:</b> not set")
+        return await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+    arg = " ".join(message.command[1:]).strip()
+    low = arg.lower()
+    if low in ("clear", "remove", "off", "reset", "none", "delete"):
         await db.set_dump_chat(user_id, None)
-        return await message.reply_text("✅ <b>Dump Chat Cleared Successfully</b>", parse_mode=enums.ParseMode.HTML)
-    try:
-        chat_id = int(arg)
-        try:
-            chat = await client.get_chat(chat_id)
-            chat_title = chat.title or "Private Chat"
-        except:
-            chat_title = "Unknown Chat"
-        await db.set_dump_chat(user_id, chat_id)
-        await message.reply_text(
-            f"✅ <b>Dump Chat Set Successfully</b>\n\n"
-            f"<b>Forward To:</b> <code>{chat_id}</code>\n"
-            f"<b>Title:</b> {chat_title}",
+        forget_preflight(current)
+        return await message.reply_text(
+            "✅ <b>Target Chat Cleared</b>\n\n<i>Saved content will now be sent to this bot chat again.</i>",
             parse_mode=enums.ParseMode.HTML
         )
-    except ValueError:
-        await message.reply_text("❌ <b>Invalid Chat ID</b>\n\n<i>Must be a number (e.g., -1001234567890)</i>", parse_mode=enums.ParseMode.HTML)
+    if low in ("check", "status", "test"):
+        if not current:
+            return await message.reply_text("ℹ️ <b>No target chat is set.</b>\n<i>Use /setchat &lt;chat_id&gt;</i>", parse_mode=enums.ParseMode.HTML)
+        wait = await message.reply_text("🔎 <i>Checking your target chat...</i>", parse_mode=enums.ParseMode.HTML)
+        forget_preflight(current)
+        rep = await inspect_target(client, [current], user_id=user_id, owner_id=OWNER_ID, send_test=True)
+        text = format_report(rep, saved=None)
+        if not rep["ok"]:
+            text += "\n\n<i>Fix the problem above, or use /setchat clear.</i>"
+        return await wait.edit_text(text, parse_mode=enums.ParseMode.HTML)
+    candidates, err = parse_target_input(arg)
+    if err:
+        return await message.reply_text(f"❌ <b>Invalid Chat</b>\n\n<i>{esc(err)}</i>", parse_mode=enums.ParseMode.HTML)
+    wait = await message.reply_text("🔎 <i>Verifying the chat, the bot's admin rights and your rights...</i>", parse_mode=enums.ParseMode.HTML)
+    try:
+        rep = await inspect_target(client, candidates, user_id=user_id, owner_id=OWNER_ID, send_test=True)
+        if rep["ok"]:
+            await db.set_dump_chat(user_id, rep["chat_id"])
+            forget_preflight(rep["chat_id"])
+        await wait.edit_text(format_report(rep, saved=rep["ok"]), parse_mode=enums.ParseMode.HTML)
     except Exception as e:
-        await message.reply_text(f"❌ <b>Unable to Access Chat</b>\n<i>{e}</i>", parse_mode=enums.ParseMode.HTML)
+        await wait.edit_text(f"❌ <b>Unable to check this chat</b>\n<code>{esc(e)}</code>", parse_mode=enums.ParseMode.HTML)
 # ======================================================
 # Callbacks - Full Settings Navigation
 # ======================================================
@@ -106,25 +127,23 @@ async def settings_callbacks(client: Client, callback_query: CallbackQuery):
     elif data == "dump_chat_btn":
         current = await db.get_dump_chat(user_id)
         if current:
-            try:
-                chat = await client.get_chat(current)
-                title = chat.title or "Private Chat"
-            except:
-                title = "Unknown (Inaccessible)"
-            text = (
-                f"<b>🗑 Current Dump Chat</b>\n\n"
-                f"<b>Chat ID:</b> <code>{current}</code>\n"
-                f"<b>Title:</b> {title}\n\n"
-                "<i>All saved files are forwarded here.</i>\n"
-                "<i>Use /setchat to change or clear.</i>"
-            )
+            rep = await inspect_target(client, [current], user_id=user_id, owner_id=OWNER_ID, send_test=False)
+            text = format_report(rep, saved=None)
+            text += "\n\n<i>All saved content is forwarded to this chat. Use /setchat to change, /setchat check to test, /setchat clear to remove.</i>"
         else:
             text = (
-                "<b>🗑 No Dump Chat Set</b>\n\n"
-                "<i>Saved files appear only in this chat.</i>\n"
-                "<i>Use /setchat &lt;chat_id&gt; to enable forwarding.</i>"
+                "<b>🎯 No Target Chat Set</b>\n\n"
+                "<i>Saved content appears only in this chat.</i>\n"
+                "<i>Use /setchat &lt;chat_id&gt; to forward into a channel or group.</i>"
             )
-        await callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(back_close), parse_mode=enums.ParseMode.HTML)
+        markup = InlineKeyboardMarkup(back_close)
+        try:
+            if callback_query.message.photo or callback_query.message.caption is not None:
+                await callback_query.edit_message_caption(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
+            else:
+                await callback_query.edit_message_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
+        except Exception:
+            await callback_query.message.reply_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
     elif data == "thumb_btn":
         thumb = await db.get_thumbnail(user_id)
         if thumb and os.path.exists(thumb):

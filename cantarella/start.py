@@ -18,6 +18,7 @@ from pyrogram.errors import (
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery, InputMediaPhoto, ReplyKeyboardRemove
 from config import API_ID, API_HASH, ERROR_MESSAGE
 from database.db import db
+from cantarella.targetchat import explain_error, dest_error_kind, preflight
 import math
 from logger import LOGGER
 logger = LOGGER(__name__)
@@ -177,23 +178,19 @@ FILE_MEDIA_ATTR = {
 THUMB_TYPES = ("Video", "Document", "Animation", "VideoNote", "Audio")
 # messages that have no file: they are re-created by the bot, nothing to download
 NON_FILE_TYPES = ("Poll", "Contact", "Venue", "Location", "Dice")
-async def copy_public_message(client, message, chat, msgid):
-    """Copy one post of a public channel/group. One FloodWait retry."""
+async def copy_public_message(client, message, chat, msgid, dest=None):
+    """Copy one post of a public channel/group. One retry on FloodWait / slow-mode.
+    dest = target chat id from /setchat (None -> the user's own bot chat)."""
+    kwargs = dict(chat_id=dest or message.chat.id, from_chat_id=chat, message_id=msgid)
+    if not dest:
+        kwargs["reply_to_message_id"] = message.id
     try:
-        return await client.copy_message(
-            chat_id=message.chat.id,
-            from_chat_id=chat,
-            message_id=msgid,
-            reply_to_message_id=message.id
-        )
-    except FloodWait as fw:
-        await asyncio.sleep(int(fw.value) + 1)
-        return await client.copy_message(
-            chat_id=message.chat.id,
-            from_chat_id=chat,
-            message_id=msgid,
-            reply_to_message_id=message.id
-        )
+        return await client.copy_message(**kwargs)
+    except Exception as e:
+        if type(e).__name__ in ("FloodWait", "SlowmodeWait"):
+            await asyncio.sleep(min(int(getattr(e, "value", 1)), 60) + 1)
+            return await client.copy_message(**kwargs)
+        raise
 async def probe_message(client, chat, msgid):
     """What does the BOT see at this id?  Returns:
        "ok"      -> a real message (bot can read this chat)
@@ -240,7 +237,7 @@ async def send_non_file_message(client, chat_id, msg, msg_type):
         return True
     except Exception as e:
         logger.error(f"Non-file message ({msg_type}) could not be sent: {e}")
-        return False
+        raise
 # --------------------------------------------------------
 # Robust Telegram link parser (public / private / batch)
 # Handles links even when surrounded by extra text/spaces,
@@ -471,39 +468,105 @@ async def save(client: Client, message: Message):
                 "<code>https://t.me/c/1234567890/123</code>",
                 parse_mode=enums.ParseMode.HTML
             )
-        batch_temp.IS_BATCH[message.from_user.id] = False
+        uid = message.from_user.id
+        # ---------- Target chat (/setchat): content goes THERE, progress/errors stay in this bot chat ----------
+        dest_chat = None
+        dest_title = None
+        try:
+            dump_id = await db.get_dump_chat(uid)
+        except Exception:
+            dump_id = None
+        if dump_id:
+            pre = await preflight(client, dump_id)
+            if not pre["ok"]:
+                reasons = "\n".join(f"• {_html.escape(x)}" for x in pre["problems"]) or "• The target chat is not reachable."
+                return await message.reply_text(
+                    "<b>❌ Target Chat Problem</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"<b>Chat ID:</b> <code>{dump_id}</code>\n\n"
+                    f"{reasons}\n\n"
+                    "<i>Nothing was forwarded. Fix it and send the link again, use /setchat to pick another chat, "
+                    "or /setchat clear to receive files here.</i>",
+                    parse_mode=enums.ParseMode.HTML
+                )
+            dest_chat = pre["chat_id"]
+            dest_title = pre["title"] or str(dest_chat)
+        batch_temp.IS_BATCH[uid] = False
         is_private_link = kind == "private"
         is_public_link = kind == "public"
-        delivered = 0          # how many messages were really delivered
+        total = toID - fromID + 1
+        delivered = 0          # really delivered
+        failed = 0             # tried but failed
+        skipped = 0            # deleted / service messages
         notified = False       # an error / info message was already shown to the user
         bot_can_read = False   # the bot itself can read this public chat (so "empty" = really deleted)
+        errors = []            # short reasons for the final summary (target-chat mode)
+        stop_reason = None
+        cur = fromID
+        status = None
+        last_edit = 0.0
+        def status_text(head, done):
+            return (
+                f"<b>{head}</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Target:</b> {_html.escape(str(dest_title))}\n"
+                f"<b>Progress:</b> <code>{done}/{total}</code>\n"
+                f"<b>✅ Forwarded:</b> <code>{delivered}</code>   "
+                f"<b>❌ Failed:</b> <code>{failed}</code>   "
+                f"<b>⏭ Skipped:</b> <code>{skipped}</code>"
+            )
+        async def refresh(text, force=False):
+            nonlocal last_edit
+            if status is None:
+                return
+            now = time.time()
+            if not force and now - last_edit < 3:
+                return
+            last_edit = now
+            try:
+                await status.edit_text(text, parse_mode=enums.ParseMode.HTML)
+            except Exception:
+                pass
+        if dest_chat:
+            status = await message.reply_text(status_text("📤 Forwarding Started", 0), parse_mode=enums.ParseMode.HTML)
         for msgid in range(fromID, toID + 1):
-           
-            if batch_temp.IS_BATCH.get(message.from_user.id):
+            cur = msgid
+            if batch_temp.IS_BATCH.get(uid):
                 break
-           
+            if dest_chat:
+                await refresh(status_text("📤 Forwarding...", msgid - fromID))
             if is_public_link:
                 # Public channel OR public group (users' messages + anonymous/"as group" messages)
+                sent = None
                 try:
-                    sent = await copy_public_message(client, message, target, msgid)
+                    sent = await copy_public_message(client, message, target, msgid, dest_chat)
                 except Exception as e:
-                    sent = None
+                    kind_ = dest_error_kind(e) if dest_chat else None
+                    if kind_ == "fatal":
+                        stop_reason = explain_error(e)
+                        break
+                    if kind_ == "content":
+                        failed += 1
+                        errors.append(f"#{msgid}: {explain_error(e)}")
+                        continue
                 if sent:
                     bot_can_read = True
                     delivered += 1
-                    await db.add_traffic(message.from_user.id)
+                    await db.add_traffic(uid)
                     await asyncio.sleep(1)
                     continue
                 state = await probe_message(client, target, msgid)
                 if state == "service":
+                    skipped += 1
                     continue                     # real service message: nothing to forward
                 if state == "ok":
                     bot_can_read = True          # readable but not copyable (protected) -> login flow below
                 elif state == "empty" and bot_can_read:
+                    skipped += 1
                     continue                     # bot reads this chat fine, so this id is really deleted
                 # "empty" first-time / "error": the bot cannot read this chat (typical for groups the
                 # bot has not joined) -> let the logged-in account fetch it (download & upload flow)
-            user_data = await db.get_session(message.from_user.id)
+            user_data = await db.get_session(uid)
             if user_data is None:
                 await message.reply(
                     "<b>🔒 Authentication Required</b>\n\n"
@@ -511,8 +574,9 @@ async def save(client: Client, message: Message):
                     "<i>Use /login to securely authorize your account.</i>",
                     parse_mode=enums.ParseMode.HTML
                 )
-                batch_temp.IS_BATCH[message.from_user.id] = True
-                return
+                notified = True
+                stop_reason = "Login required to read this content. Use /login."
+                break
             try:
                 acc = Client(
                     "saverestricted",
@@ -524,24 +588,59 @@ async def save(client: Client, message: Message):
                 )
                 await acc.connect()
             except Exception as e:
-                batch_temp.IS_BATCH[message.from_user.id] = True
-                return await message.reply(f"<b>❌ Authentication Failed</b>\n\n<i>Your session may have expired. Please /logout and /login again.</i>\n<code>{e}</code>", parse_mode=enums.ParseMode.HTML)
-            result = await handle_restricted_content(client, acc, message, target, msgid)
+                await message.reply(f"<b>❌ Authentication Failed</b>\n\n<i>Your session may have expired. Please /logout and /login again.</i>\n<code>{e}</code>", parse_mode=enums.ParseMode.HTML)
+                notified = True
+                stop_reason = "Your login session is not valid. Use /logout and /login again."
+                break
+            result = await handle_restricted_content(client, acc, message, target, msgid, dest_chat, errors)
             try:
                 await acc.disconnect()
             except Exception:
                 pass
             if result is True:
                 delivered += 1
-            elif result == "notified":
-                notified = True
+            elif result in ("notified", "failed"):
+                failed += 1
+                notified = notified or result == "notified"
             elif result is False:
+                failed += 1
                 notified = True
-                break  # chat itself is not reachable with this account: stop the range instead of repeating the same error
+                stop_reason = errors[-1].split(": ", 1)[-1] if errors else "Stopped because of an error."
+                break  # chat itself is not reachable / target cannot be written: stop instead of repeating the same error
+            else:
+                skipped += 1
             await asyncio.sleep(1)  # Turbo: shorter gap between consecutive saves
-        was_cancelled = batch_temp.IS_BATCH.get(message.from_user.id) is True
-        batch_temp.IS_BATCH[message.from_user.id] = True
-        if delivered == 0 and not notified and not was_cancelled:
+        else:
+            cur = toID + 1
+        was_cancelled = batch_temp.IS_BATCH.get(uid) is True and stop_reason is None
+        batch_temp.IS_BATCH[uid] = True
+        done = min(max(cur - fromID, 0), total)
+        if status is not None:
+            if stop_reason:
+                head = "❌ Forwarding Stopped"
+            elif was_cancelled:
+                head = "🛑 Forwarding Cancelled"
+            elif failed and not delivered:
+                head = "❌ Forwarding Failed"
+            elif failed:
+                head = "⚠️ Forwarding Finished With Errors"
+            elif delivered:
+                head = "✅ Forwarding Complete"
+            else:
+                head = "ℹ️ Nothing To Forward"
+            text = status_text(head, done)
+            if stop_reason:
+                text += f"\n\n<b>Reason:</b> <i>{_html.escape(stop_reason)}</i>"
+            if errors:
+                text += "\n\n<b>Errors:</b>\n" + "\n".join(f"• <code>{_html.escape(e)[:200]}</code>" for e in errors[:5])
+                if len(errors) > 5:
+                    text += f"\n<i>...and {len(errors) - 5} more</i>"
+            if not delivered and not failed and not stop_reason and not was_cancelled:
+                text += ("\n\n<i>This link has no content: the message was deleted, or it is only a service / "
+                         "topic-header message. Send a message link like</i> <code>https://t.me/group/1362</code> "
+                         "<i>or</i> <code>https://t.me/group/1359/1362</code>")
+            await refresh(text, force=True)
+        elif delivered == 0 and not notified and not was_cancelled:
             # never stay silent
             try:
                 await message.reply_text(
@@ -556,7 +655,31 @@ async def save(client: Client, message: Message):
                 )
             except Exception:
                 pass
-async def handle_restricted_content(client: Client, acc, message: Message, chat_target, msgid):
+async def handle_restricted_content(client: Client, acc, message: Message, chat_target, msgid, dest=None, report=None):
+    """Download with the logged-in account and upload with the bot.
+    dest   -> target chat id from /setchat (content goes there; progress stays in the user's chat)
+    report -> list that receives short error reasons
+    Returns: True delivered | False fatal (stop the range) | "notified" failed + user was told |
+             "failed" failed (recorded in report) | None nothing to send (deleted / service)"""
+    dest_id = dest or message.chat.id
+    def _note(reason):
+        if report is not None:
+            report.append(f"#{msgid}: {reason}")
+    async def _fail(e):
+        reason = explain_error(e)
+        _note(reason)
+        fatal = bool(dest) and dest_error_kind(e, True) == "fatal"
+        if not dest:
+            try:
+                await client.send_message(
+                    message.chat.id,
+                    f"<b>❌ Could not send message #{msgid}</b>\n<code>{_html.escape(reason)[:300]}</code>",
+                    parse_mode=enums.ParseMode.HTML
+                )
+            except Exception:
+                pass
+            return "notified"
+        return False if fatal else "failed"
     try:
         msg: Message = await acc.get_messages(chat_target, msgid)
     except Exception as e:
@@ -581,6 +704,7 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
                 )
             except Exception:
                 pass
+            _note("The source chat is not accessible with your logged-in account.")
             return False
     # Deleted messages and service messages (joined / pinned / title changed ...) have no content
     if msg.empty or getattr(msg, "service", None):
@@ -605,14 +729,16 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
             return "notified"
     if msg_type == "Text":
         try:
-            await client.send_message(message.chat.id, msg.text, entities=msg.entities, parse_mode=enums.ParseMode.HTML)
+            await client.send_message(dest_id, msg.text, entities=msg.entities, parse_mode=enums.ParseMode.HTML)
             return True
-        except:
-            return
+        except Exception as e:
+            return await _fail(e)
     if msg_type in NON_FILE_TYPES:
-        if await send_non_file_message(client, message.chat.id, msg, msg_type):
+        try:
+            await send_non_file_message(client, dest_id, msg, msg_type)
             return True
-        return
+        except Exception as e:
+            return await _fail(e)
     await db.add_traffic(message.from_user.id)
     smsg = await client.send_message(message.chat.id, '<b>⬇️ Starting Download...</b>', reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
    
@@ -635,6 +761,7 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
             await smsg.edit("❌ **Task Cancelled**")
             return "notified"
         # do not fail silently: tell the user why the download did not work
+        _note("Download failed: " + explain_error(e))
         try:
             await smsg.edit(f"<b>❌ Download Failed</b>\n<code>{_html.escape(str(e))[:300]}</code>", parse_mode=enums.ParseMode.HTML)
         except Exception:
@@ -674,21 +801,21 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
                     _cap_html = _html.escape(str(msg.caption))
                 final_caption += f"\n\n{_cap_html}"
         if msg_type == "Document":
-            await client.send_document(message.chat.id, file, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
+            await client.send_document(dest_id, file, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
         elif msg_type == "Video":
-            await client.send_video(message.chat.id, file, duration=msg.video.duration, width=msg.video.width, height=msg.video.height, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
+            await client.send_video(dest_id, file, duration=msg.video.duration, width=msg.video.width, height=msg.video.height, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
         elif msg_type == "Audio":
-            await client.send_audio(message.chat.id, file, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
+            await client.send_audio(dest_id, file, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
         elif msg_type == "Photo":
-            await client.send_photo(message.chat.id, file, caption=final_caption)
+            await client.send_photo(dest_id, file, caption=final_caption)
         elif msg_type == "Voice":
-            await client.send_voice(message.chat.id, file, duration=msg.voice.duration or 0, caption=final_caption, progress=progress, progress_args=[message, "up"])
+            await client.send_voice(dest_id, file, duration=msg.voice.duration or 0, caption=final_caption, progress=progress, progress_args=[message, "up"])
         elif msg_type == "VideoNote":
-            await client.send_video_note(message.chat.id, file, duration=msg.video_note.duration or 0, length=msg.video_note.length or 240, thumb=ph_path, progress=progress, progress_args=[message, "up"])
+            await client.send_video_note(dest_id, file, duration=msg.video_note.duration or 0, length=msg.video_note.length or 240, thumb=ph_path, progress=progress, progress_args=[message, "up"])
         elif msg_type == "Animation":
-            await client.send_animation(message.chat.id, file, duration=msg.animation.duration or 0, width=msg.animation.width or 0, height=msg.animation.height or 0, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
+            await client.send_animation(dest_id, file, duration=msg.animation.duration or 0, width=msg.animation.width or 0, height=msg.animation.height or 0, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
         elif msg_type == "Sticker":
-            await client.send_sticker(message.chat.id, file)
+            await client.send_sticker(dest_id, file)
         uploaded = True
        
     except Exception as e:
@@ -702,11 +829,19 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
     await client.delete_messages(message.chat.id, [smsg.id])
     if uploaded:
         return True
+    reason = explain_error(upload_error)
+    _note(reason)
     try:
         # the status message above is deleted, so keep the reason visible
-        await client.send_message(message.chat.id, f"<b>❌ Upload Failed</b>\n<code>{_html.escape(str(upload_error))[:300]}</code>", parse_mode=enums.ParseMode.HTML)
+        await client.send_message(
+            message.chat.id,
+            f"<b>❌ Upload Failed</b> <i>(message #{msgid})</i>\n<code>{_html.escape(reason)[:300]}</code>",
+            parse_mode=enums.ParseMode.HTML
+        )
     except Exception:
         pass
+    if dest and dest_error_kind(upload_error, True) == "fatal":
+        return False
     return "notified"
 @Client.on_callback_query()
 async def button_callbacks(client: Client, callback_query: CallbackQuery):
