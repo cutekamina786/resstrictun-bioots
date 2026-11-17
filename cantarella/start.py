@@ -194,6 +194,25 @@ async def copy_public_message(client, message, chat, msgid, dest=None):
             await asyncio.sleep(min(int(getattr(e, "value", 1)), 60) + 1)
             return await client.copy_message(**kwargs)
         raise
+_ME_CACHE = {}
+async def ensure_account_me(acc, user_data):
+    """A Pyrogram client that was only connect()-ed (not start()-ed) has client.me = None.
+    Uploading a file then crashes with: 'NoneType' object has no attribute 'is_premium'.
+    Load (and cache) the account's own profile so uploads/downloads work."""
+    if getattr(acc, "me", None) is not None:
+        return
+    me = _ME_CACHE.get(user_data)
+    if me is None:
+        try:
+            me = await acc.get_me()
+        except Exception as e:
+            if type(e).__name__ in ("AuthKeyUnregistered", "AuthKeyInvalid", "SessionRevoked",
+                                    "SessionExpired", "UserDeactivated", "UserDeactivatedBan"):
+                raise      # the saved login is dead -> reported as "Authentication Failed"
+            logger.error(f"Could not load the account profile: {e}")
+            return
+        _ME_CACHE[user_data] = me
+    acc.me = me
 async def probe_message(client, chat, msgid):
     """What does the BOT see at this id?  Returns:
        "ok"      -> a real message (bot can read this chat)
@@ -624,6 +643,7 @@ async def save(client: Client, message: Message):
                     max_concurrent_transmissions=20  # Turbo: more parallel chunks for private-channel down/upload
                 )
                 await acc.connect()
+                await ensure_account_me(acc, user_data)
             except Exception as e:
                 await message.reply(f"<b>❌ Authentication Failed</b>\n\n<i>Your session may have expired. Please /logout and /login again.</i>\n<code>{e}</code>", parse_mode=enums.ParseMode.HTML)
                 notified = True
@@ -821,6 +841,7 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
             await smsg.edit("❌ **Task Cancelled**")
             return "notified"
         # do not fail silently: tell the user why the download did not work
+        logger.error(f"Download failed for message {msgid}: {type(e).__name__}: {e}", exc_info=True)
         _note("Download failed: " + explain_error(e, "user"))
         try:
             await smsg.edit(f"<b>❌ Download Failed</b>\n<code>{_html.escape(str(e))[:300]}</code>", parse_mode=enums.ParseMode.HTML)
@@ -880,6 +901,7 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
        
     except Exception as e:
          upload_error = e
+         logger.error(f"Upload failed for message {msgid} (sender: {actor}): {type(e).__name__}: {e}", exc_info=True)
          try:
              await smsg.edit(f"Upload Failed: {e}")
          except Exception:
