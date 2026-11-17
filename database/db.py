@@ -148,6 +148,16 @@ class Database:
     async def get_dump_chat(self, id):
         user = await self.col.find_one({'id': int(id)})
         return (user or {}).get('dump_chat', None)
+    # Forwarding mode (global, per user): 'bot' = bot posts in the target chat, 'user' = logged-in account posts
+    async def set_forward_mode(self, id, mode):
+        if mode not in ('bot', 'user'):
+            await self.col.update_one({'id': int(id)}, {'$unset': {'forward_mode': ""}})
+        else:
+            await self.col.update_one({'id': int(id)}, {'$set': {'forward_mode': mode}})
+    async def get_forward_mode(self, id):
+        user = await self.col.find_one({'id': int(id)})
+        mode = (user or {}).get('forward_mode', None)
+        return mode if mode in ('bot', 'user') else None
     # Delete/Replace Words Support
     async def set_delete_words(self, id, words):
         await self.col.update_one({'id': int(id)}, {'$addToSet': {'delete_words': {'$each': words}}})
