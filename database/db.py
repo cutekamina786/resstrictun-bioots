@@ -211,7 +211,7 @@ class Database:
             return False # Allowed (count is 0)
         # 3. Check Count
         usage = user.get('daily_usage', 0)
-        if usage >= 5:
+        if usage >= 3:
             return True # Blocked
        
         return False # Allowed
