@@ -1,7 +1,7 @@
 """
 Save Restricted Content Bot Configuration
 
-Developed by: LastPerson07 X Nawaab
+Developed by: Vip Nawaab
 Telegram: Team Nawaab
 
 Please retain this credit if you use or modify this project.
@@ -14,20 +14,17 @@ import os
 # Telegram Bot Credentials
 # ==============================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-API_ID = int(os.environ.get("API_ID", "38498066"))
-API_HASH = os.environ.get("API_HASH", "c9696114751feacdeb1b4487f5839a1a")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "") #enter Your Bot Token
+API_ID = int(os.environ.get("API_ID", "38498066")) #Enter Your Api ID
+API_HASH = os.environ.get("API_HASH", "c9696114751feacdeb1b4487f5839a1a") #Enter Your Api Hash
 
 
 # ==============================
 # Owner Configuration
 # ==============================
 
-# Single-owner control system: only this user ID can control the bot
-# (broadcast, /users, /addauth, /rmauth, premium grant/revoke, ban/unban,
-# dump-chat override, etc). There is no separate "admin" tier anymore —
 # set your own Telegram user ID in the OWNER_ID environment variable.
-OWNER_ID = int(os.environ.get("OWNER_ID", "8909902924"))
+OWNER_ID = int(os.environ.get("OWNER_ID", "8909902924")) #Enter Your Owner ID
 
 
 # ==============================
@@ -44,7 +41,7 @@ OWNER_LINK = f"https://t.me/{OWNER_USERNAME[1:]}"
 
 # Channel name shown everywhere (buttons, captions, texts) and the channel link it opens.
 CHANNEL_NAME = os.environ.get("CHANNEL_NAME", "Team Nawaab")
-CHANNEL_LINK = os.environ.get("CHANNEL_LINK", "https://t.me/TeamCinderella")
+CHANNEL_LINK = os.environ.get("CHANNEL_LINK", "https://t.me/TeamNawaab")
 
 
 # ==============================
@@ -60,7 +57,7 @@ DB_NAME = os.environ.get("DB_NAME", "SaveRestricted2")
 # ==============================
 
 # Replace with your Telegram log channel ID (example: -1001234567890)
-LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "-1004441195247"))
+LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "-1004441195247")) #Only Get New Users Notifications.
 
 
 # ==============================
@@ -85,7 +82,7 @@ FORCE_SUB_SWEEP_SECONDS = int(os.environ.get("FORCE_SUB_SWEEP_SECONDS", "60"))
 # NOTE: a channel whose chat_id is still the "-100XXXXXXXXXX" placeholder is ignored.
 FORCE_SUB_CHANNELS = [
     {"title": f"📢 {CHANNEL_NAME}", "link": CHANNEL_LINK, "chat_id": "-1003330631655"},
-    {"title": "💸VIP Channel", "link": "https://t.me/+yMpFHjaghI1mOTFl", "chat_id": "-1002258155184"},
+    {"title": "✌️Team Cinderella", "link": "https://t.me/TeamCinderella", "chat_id": "-1003855447385"},
 ]
 
 
