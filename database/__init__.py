@@ -1,14 +1,14 @@
-# cantarella
+# Nawaab
 # Don't Remove Credit
-# Telegram Channel @cantarellabots
+# Telegram Channel: Team Nawaab
 
 
-# cantarella
+# Nawaab
 # Don't Remove Credit
-# Telegram Channel @cantarellabots
+# Telegram Channel: Team Nawaab
 
 #from database.DB import db
 
-# cantarella
+# Nawaab
 # Don't Remove Credit
-# Telegram Channel @cantarellabots
+# Telegram Channel: Team Nawaab
