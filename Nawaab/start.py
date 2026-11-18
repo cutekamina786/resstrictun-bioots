@@ -66,7 +66,7 @@ class script(object):
 • Initiate with <code>/batch</code> for multiple files.
 • Follow interactive prompts for seamless processing.
 <blockquote><b>🛑 Free User Limitations:</b></blockquote>
-• <b>Daily Quota:</b> 5 Files / 24 Hours
+• <b>Daily Quota:</b> 3 Files / 24 Hours
 • <b>File Size Cap:</b> 2GB Maximum
 <blockquote><b>💎 Premium Membership Benefits:</b></blockquote>
 • Unlimited Downloads & No Restrictions.
@@ -112,7 +112,7 @@ class script(object):
 """
     CAPTION = f"""<b><a href="{CHANNEL_LINK}"></a></b>\n\n<b>⚜️ Powered By : <a href="{OWNER_LINK}">{CHANNEL_NAME} 😎</a></b>"""
     LIMIT_REACHED = """<b>🚫 Daily Limit Exceeded</b>
-<b>Your 5 free saves for today have been used.</b>
+<b>Your 3 free saves for today have been used.</b>
 <i>Quota resets automatically after 24 hours from first download.</i>
 <blockquote><b>🔓 Upgrade to Premium for Unlimited Access!</b></blockquote>
 Remove all restrictions and enjoy seamless downloading.
