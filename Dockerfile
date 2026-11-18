@@ -1,7 +1,7 @@
 # ========================================================
-# cantarella
+# Nawaab
 # Don't Remove Credit 🥺
-# Telegram Channel @cantarellabots
+# Telegram Channel: Team Nawaab
 #
 # Maintained & Updated by:
 # Dhanpal Sharma
@@ -37,7 +37,7 @@ COPY . .
 CMD ["python3", "bot.py"]
 
 # ========================================================
-# cantarella
+# Nawaab
 # Don't Remove Credit
 #
 # Updated & Managed by:

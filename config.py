@@ -1,8 +1,8 @@
 """
 Save Restricted Content Bot Configuration
 
-Developed by: LastPerson07Xcantarella
-Telegram: @cantarellabots X @THEUPDATEDGUYS
+Developed by: LastPerson07 X Nawaab
+Telegram: Team Nawaab
 
 Please retain this credit if you use or modify this project.
 """
@@ -28,6 +28,23 @@ API_HASH = os.environ.get("API_HASH", "c9696114751feacdeb1b4487f5839a1a")
 # dump-chat override, etc). There is no separate "admin" tier anymore —
 # set your own Telegram user ID in the OWNER_ID environment variable.
 OWNER_ID = int(os.environ.get("OWNER_ID", "8909902924"))
+
+
+# ==============================
+# Branding (change ONLY here - every text, button and link of the bot reads these)
+# ==============================
+
+# Owner / contact / developer username shown everywhere (contact, developer, help,
+# premium, payment, "Developed by" ...). Keep the leading "@".
+OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "@SmartBoy_ApnaMS")
+if not OWNER_USERNAME.startswith("@"):
+    OWNER_USERNAME = "@" + OWNER_USERNAME
+# Link built automatically from the username above (https://t.me/<username>)
+OWNER_LINK = f"https://t.me/{OWNER_USERNAME[1:]}"
+
+# Channel name shown everywhere (buttons, captions, texts) and the channel link it opens.
+CHANNEL_NAME = os.environ.get("CHANNEL_NAME", "Team Nawaab")
+CHANNEL_LINK = os.environ.get("CHANNEL_LINK", "https://t.me/TeamCinderella")
 
 
 # ==============================
@@ -67,7 +84,7 @@ FORCE_SUB_SWEEP_SECONDS = int(os.environ.get("FORCE_SUB_SWEEP_SECONDS", "60"))
 #   chat_id -> the channel's chat id (the "-100..." one). The bot must be ADMIN in that channel.
 # NOTE: a channel whose chat_id is still the "-100XXXXXXXXXX" placeholder is ignored.
 FORCE_SUB_CHANNELS = [
-    {"title": "📢 Update Channel", "link": "https://t.me/teamcinderella", "chat_id": "-1003330631655"},
+    {"title": f"📢 {CHANNEL_NAME}", "link": CHANNEL_LINK, "chat_id": "-1003330631655"},
     {"title": "💸VIP Channel", "link": "https://t.me/+yMpFHjaghI1mOTFl", "chat_id": "-1002258155184"},
 ]
 

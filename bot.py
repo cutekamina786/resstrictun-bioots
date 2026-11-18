@@ -6,7 +6,7 @@ from datetime import timezone, timedelta
 from pyrogram import Client, filters, enums, __version__ as pyrogram_version
 from pyrogram.types import Message, BotCommand
 from pyrogram.errors import FloodWait, RPCError
-from config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, OWNER_ID
+from config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, OWNER_ID, OWNER_USERNAME
 from database.db import db
 from logger import LOGGER
 
@@ -34,11 +34,11 @@ LOGO = r"""
 class Bot(Client):
     def __init__(self):
         super().__init__(
-            name="cantarella_Login_Bot",
+            name="Nawaab_Login_Bot",
             api_id=API_ID,
             api_hash=API_HASH,
             bot_token=BOT_TOKEN,
-            plugins=dict(root="cantarella"),
+            plugins=dict(root="Nawaab"),
             workers=10, 
             sleep_threshold=15,
             max_concurrent_transmissions=5,
@@ -93,7 +93,7 @@ class Bot(Client):
             f"<b>Bot:</b> @{me.username}\n"
             f"<b>Users:</b> <code>{user_count} / 200</code>\n"
             f"<b>Time:</b> <code>{now.strftime('%I:%M %p')} IST</code>\n\n"
-            f"<b>Developed by @SmartBoy_ApnaMS</b>"
+            f"<b>Developed by {OWNER_USERNAME}</b>"
         )
 
         try:
@@ -106,7 +106,7 @@ class Bot(Client):
 
         # 5. Force-subscribe background tasks (startup channel check + leave sweeper)
         try:
-            from cantarella.forcesub import start_background
+            from Nawaab.forcesub import start_background
             start_background(self)
         except Exception as e:
             logger.warning(f"Force-sub background start failed: {e}")

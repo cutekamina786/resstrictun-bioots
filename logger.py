@@ -1,8 +1,8 @@
 """
 Logging Configuration
 
-Developed by: LastPerson07 × cantarella
-Telegram: @cantarellabots | @THEUPDATEDGUYS
+Developed by: LastPerson07 × Nawaab
+Telegram: Team Nawaab
 """
 
 import logging
