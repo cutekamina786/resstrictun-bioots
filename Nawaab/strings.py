@@ -50,7 +50,7 @@ HELP_TXT = """<b>🚀 Welcome to Nawaab Save Restricted Bot - Complete Guide</b>
 <blockquote><b>/thumb_mode</b> — Check thumbnail status</blockquote>
 
 <b>💡 Tips</b>
-• Free users: 5 saves/day + 5 files per batch
+• Free users: 3 saves/day + 3 files per batch
 • Premium users: Unlimited saves & batch size
 • Contact {OWNER_USERNAME} for support or premium purchase
 
