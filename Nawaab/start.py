@@ -1,4 +1,4 @@
-# Developed by: LastPerson07 × Nawaab
+# Developed by: Vip Nawaab
 # Telegram: Team Nawaab
 import os
 import re
@@ -48,9 +48,9 @@ class script(object):
 <b>🤖 I am <a href=https://t.me/{}>{}</a></b>
 <i>Your Professional Restricted Content Saver Bot.</i>
 <blockquote><b>🚀 System Status: 🟢 Online</b>
-<b>⚡ Performance: 10x High-Speed Processing</b>
+<b>⚡ Performance: 30x High-Speed Processing</b>
 <b>🔐 Security: End-to-End Encrypted</b>
-<b>📊 Uptime: 99.9% Guaranteed</b></blockquote>
+<b>📊 Uptime: 99.99% Guaranteed</b></blockquote>
 <b>👇 Select an Option Below to Get Started:</b>
 """
     HELP_TXT = """<b>📚 Comprehensive Help & User Guide</b>
@@ -74,12 +74,12 @@ class script(object):
 """
     ABOUT_TXT = f"""<b>ℹ️ About This Bot</b>
 <blockquote><b>╭────[ 🧩 Technical Stack ]────⍟</b>
-<b>├⍟ 🤖 Bot Name : <a href=http://t.me/Nawaab_SaveRestrictionBot>Save Content</a></b>
+<b>├⍟ 🤖 Bot Name : <a href=http://t.me/Nawaab_SaveRestrictionBot>Save Content Bot</a></b>
 <b>├⍟ 👨‍💻 Developer : <a href={OWNER_LINK}>MS BRO</a></b>
-<b>├⍟ 📚 Library : <a href='https://docs.pyrogram.org/'>Pyrogram Async</a></b>
-<b>├⍟ 🐍 Language : <a href='https://www.python.org/'>Python 3.11+</a></b>
-<b>├⍟ 🗄 Database : <a href='https://www.mongodb.com/'>MongoDB Atlas Cluster</a></b>
-<b>├⍟ 📡 Hosting : Dedicated High-Speed VPS</b>
+<b>├⍟ 📚 Library : <a href='https://docs.pyrogram.org/'>Pyrogram</a></b>
+<b>├⍟ 🐍 Language : <a href='https://www.python.org/'>Python</a></b>
+<b>├⍟ 🗄 Database : <a href='https://www.mongodb.com/'>MongoDB</a></b>
+<b>├⍟ 📡 Hosting : Dedicated High-Speed VPS & Heroku</b>
 <b>╰───────────────⍟</b></blockquote>
 """
     PREMIUM_TEXT = f"""<b>💎 Premium Membership Plans</b>
@@ -96,9 +96,9 @@ class script(object):
 • <b>1 Month:</b> ₹150 / $1.5
 • <b>3 Month:</b> ₹300 / $3
 <blockquote><b>👇 Secure Payment:</b></blockquote>
-<b>💸 Only PhonePe Gift Card Accepting</b>
-<b>📸 Send Your Paid PhonePe Gift Card &amp; Pin Number to Owner Id:</b> {OWNER_USERNAME}
-<i>After Payment: Send Screenshot to Admin for Instant Activation.</i>
+<b>💸 Now Only PhonePe Gift Card Accepting.</b>
+<b>📸 Send Your Paid PhonePe Gift Card Number And Pin Number to Owner Id:</b> {OWNER_USERNAME}
+<i>After Payment: Send Screenshot of Gift Card to Admin for Instant Activation.</i>
 """
     PROGRESS_BAR = """\
 <b>⚡ Processing Task...</b>
