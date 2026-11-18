@@ -135,7 +135,7 @@ async def my_plan(client: Client, message: Message, user=None):
         )
     else:
         # Free Logic
-        daily_limit = 5
+        daily_limit = 3
         tokens_left = max(0, daily_limit - daily_usage)
         expired_text = (
             f"<b>⚠️ Your premium expired on:</b> <code>{_fmt_ist(expired_premium)}</code>\n\n"
