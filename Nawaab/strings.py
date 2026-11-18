@@ -19,7 +19,7 @@ HELP_TXT = """<b>🚀 Welcome to Nawaab Save Restricted Bot - Complete Guide</b>
 • Custom captions with {filename} & {size} placeholders
 • Custom thumbnails
 • Auto-forward to your dump chat
-• Daily token system (5 saves/day for free users)
+• Daily token system (3 saves/day for free users)
 • Premium = unlimited everything ♾️
 </blockquote>
 
@@ -109,7 +109,6 @@ HELP_TXT = HELP_TXT.replace("{OWNER_USERNAME}", OWNER_USERNAME)
 COMMANDS_TXT = COMMANDS_TXT.replace("{OWNER_USERNAME}", OWNER_USERNAME)
 
 # Dont remove Credits
-# Developer Telegram @about_zani/143
 # Update channel - Team Nawaab
 
 # Nawaab
