@@ -1,7 +1,7 @@
 """
 Logging Configuration
 
-Developed by: LastPerson07 × Nawaab
+Developed by: Vip Nawaab
 Telegram: Team Nawaab
 """
 
