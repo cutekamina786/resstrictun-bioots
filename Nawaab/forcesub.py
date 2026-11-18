@@ -1,11 +1,6 @@
 # ─────────────────────────────────────────────────────────────────────────
 # Force Subscribe
 #  - Every channel in FORCE_SUB_CHANNELS (config.py) must be joined to use the bot
-#  - The check runs before ANY private message / button press of a user
-#  - Joined users are SAVED in MongoDB (collection: fs_members)
-#  - When a saved user leaves a channel, the bot DMs them immediately:
-#      1) instantly, through Telegram "chat_member" updates
-#      2) as a backup, through a periodic membership sweep (FORCE_SUB_SWEEP_SECONDS)
 #  - Personal single-use invite links are created per user
 # ─────────────────────────────────────────────────────────────────────────
 import asyncio
@@ -356,7 +351,7 @@ async def notify_left(client: Client, ch: dict, user_id: int):
         _LINK_CACHE.pop((ch["chat_id"], user_id), None)
         link = await get_join_link(client, ch, user_id, fresh=True)
         text = (
-            f"😡 <b>Dude, why you left from this {html.escape(ch['title'])}?</b>\n\n"
+            f"😡 <b>Dude, why you left from this Channel {html.escape(ch['title'])}?</b>\n\n"
             "Please join it again, otherwise you can't use me."
         )
         markup = (
