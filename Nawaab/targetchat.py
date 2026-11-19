@@ -24,6 +24,21 @@ def _name(e):
     return type(e).__name__
 
 
+def fmt_wait(seconds):
+    """1633 -> '27 min 13 s'"""
+    try:
+        seconds = int(seconds)
+    except Exception:
+        return "a while"
+    h, rem = divmod(max(seconds, 0), 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h} h {m} min"
+    if m:
+        return f"{m} min {sec} s"
+    return f"{sec} s"
+
+
 def dest_error_kind(e, ambiguous_is_dest=False):
     """None  -> not a target problem
        'fatal'   -> bot cannot post in the target chat at all (stop the task)
@@ -60,7 +75,7 @@ def explain_error(e, actor="bot"):
     if n.startswith("ChatSend") and n.endswith("Forbidden"):
         return "This content type is blocked in the target chat by its permissions."
     if n in ("FloodWait", "SlowmodeWait"):
-        return f"Telegram rate limit ({n}): wait {getattr(e, 'value', '?')}s and try again."
+        return f"Telegram rate limit ({n}): wait {fmt_wait(getattr(e, 'value', 0))} and try again."
     if n == "MediaCaptionTooLong":
         return "The caption is too long for Telegram."
     if n == "Cancelled" or "Cancelled" in str(e):

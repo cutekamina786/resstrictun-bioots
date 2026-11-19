@@ -18,7 +18,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, 
 from config import API_ID, API_HASH, ERROR_MESSAGE, OWNER_USERNAME, OWNER_LINK, CHANNEL_NAME, CHANNEL_LINK
 from database.db import db
 from Nawaab.targetchat import (
-    explain_error, dest_error_kind, preflight, user_preflight, pending_forward,
+    explain_error, dest_error_kind, preflight, user_preflight, pending_forward, fmt_wait,
     fwd_buttons, FWD_ASK, mode_label
 )
 import math
@@ -202,6 +202,152 @@ async def ensure_account_me(acc, user_data):
             return
         _ME_CACHE[user_data] = me
     acc.me = me
+# --------------------------------------------------------------------------------------
+# Logged-in account pool.
+# One connected account client is kept per user and REUSED for every message and every link.
+# A brand-new client per message had to create a new auth key + auth.ExportAuthorization for each
+# media data center again and again, which ends in "420 FLOOD_WAIT_X (auth.ExportAuthorization)".
+# A reused client creates those media sessions once and keeps them.
+# --------------------------------------------------------------------------------------
+_ACC_POOL = {}        # uid -> {"acc", "key", "last", "busy"}
+_ACC_IDLE = 600       # disconnect an account that was idle for 10 minutes
+_pool_lock = asyncio.Lock()
+_reaper_task = None
+_bg_tasks = set()
+async def _close_account(acc):
+    try:
+        for ms in list(getattr(acc, "media_sessions", {}).values()):
+            try:
+                await ms.stop()
+            except Exception:
+                pass
+        getattr(acc, "media_sessions", {}).clear()
+    except Exception:
+        pass
+    try:
+        await acc.disconnect()
+    except Exception:
+        pass
+async def drop_account(uid):
+    entry = _ACC_POOL.pop(uid, None)
+    if entry:
+        await _close_account(entry["acc"])
+async def _reaper():
+    while _ACC_POOL:
+        await asyncio.sleep(60)
+        now = time.time()
+        for uid, e in list(_ACC_POOL.items()):
+            if not e["busy"] and now - e["last"] > _ACC_IDLE:
+                await drop_account(uid)
+async def get_account(uid, user_data):
+    """Connected, ready-to-use account client for this user (created once, then reused)."""
+    global _reaper_task
+    async with _pool_lock:
+        entry = _ACC_POOL.get(uid)
+        if entry and entry["key"] == user_data and getattr(entry["acc"], "is_connected", True):
+            entry["last"] = time.time()
+            return entry["acc"]
+        if entry:
+            await drop_account(uid)
+        acc = Client(
+            "saverestricted",
+            session_string=user_data,
+            api_hash=API_HASH,
+            api_id=API_ID,
+            in_memory=True,
+            sleep_threshold=60,               # waits up to 60s are slept automatically
+            max_concurrent_transmissions=20   # Turbo: more parallel chunks for private-channel down/upload
+        )
+        await acc.connect()
+        try:
+            await ensure_account_me(acc, user_data)
+        except Exception:
+            await _close_account(acc)
+            raise
+        _ACC_POOL[uid] = {"acc": acc, "key": user_data, "last": time.time(), "busy": False}
+        if _reaper_task is None or _reaper_task.done():
+            _reaper_task = asyncio.create_task(_reaper())
+        return acc
+def mark_account(uid, busy):
+    entry = _ACC_POOL.get(uid)
+    if entry:
+        entry["busy"] = busy
+        entry["last"] = time.time()
+def _is_flood(e):
+    return type(e).__name__ == "FloodWait"
+def _flood_seconds(e):
+    try:
+        return int(getattr(e, "value", 0) or 0)
+    except Exception:
+        return 0
+async def _delete_later(client, chat_id, message_id, delay=1.5):
+    await asyncio.sleep(delay)
+    try:
+        await client.delete_messages(chat_id, message_id)
+    except Exception:
+        pass
+async def find_user_side_message(acc, bot_username, bot_msg, attr):
+    """A private chat has different message ids for the two sides, so the id the bot got is NOT the id
+    the user's account sees. Find the same file in the account's own chat with the bot."""
+    want = getattr(getattr(bot_msg, attr, None), "file_unique_id", None)
+    newest_same_type = None
+    for attempt in range(4):
+        newest_same_type = None
+        async for m in acc.get_chat_history(bot_username, limit=15):
+            media = getattr(m, attr, None)
+            if not media:
+                continue
+            if newest_same_type is None:
+                newest_same_type = m
+            if want and getattr(media, "file_unique_id", None) == want:
+                return m.id
+        await asyncio.sleep(1)
+    try:
+        # photos can carry a different unique id: accept the newest fresh item of the same type
+        if newest_same_type is not None and abs(time.time() - newest_same_type.date.timestamp()) < 60:
+            return newest_same_type.id
+    except Exception:
+        pass
+    return None
+async def upload_by_bot_then_copy(client, acc, message, dest_id, do_send, msg_type):
+    """As User delivery without a second upload:
+       1) the BOT uploads the file into the user's own bot chat (progress shown there),
+       2) the user's ACCOUNT copies that message into the target chat (so it is posted as the user),
+       3) the bot's copy is auto-deleted 1-2 seconds later.
+    True = delivered. False = could not be done -> caller falls back to a direct upload by the account.
+    Target-chat problems (no rights, blocked content, flood) are raised."""
+    attr = FILE_MEDIA_ATTR[msg_type]
+    try:
+        bot_msg = await do_send(client, message.chat.id, disable_notification=True)
+    except Exception as e:
+        if batch_temp.IS_BATCH.get(message.from_user.id) or "Cancelled" in str(e):
+            raise
+        logger.error(f"Bot upload to the user chat failed, using direct upload: {type(e).__name__}: {e}")
+        return False
+    if not bot_msg:
+        return False
+    try:
+        username = getattr(getattr(client, "me", None), "username", None)
+        if not username:
+            username = getattr(await client.get_me(), "username", None)
+        if not username:
+            return False
+        user_msg_id = await find_user_side_message(acc, username, bot_msg, attr)
+        if not user_msg_id:
+            logger.error("Could not find the uploaded file in the account's chat with the bot, using direct upload")
+            return False
+        try:
+            await acc.copy_message(dest_id, username, user_msg_id)
+        except Exception as e:
+            if dest_error_kind(e, True) in ("fatal", "content") or _is_flood(e):
+                raise
+            logger.error(f"Account copy failed, using direct upload: {type(e).__name__}: {e}")
+            return False
+        return True
+    finally:
+        t = asyncio.create_task(_delete_later(client, message.chat.id, bot_msg.id))
+        _bg_tasks.add(t)
+        t.add_done_callback(_bg_tasks.discard)
 async def probe_message(client, chat, msgid):
     """What does the BOT see at this id?  Returns:
        "ok"      -> a real message (bot can read this chat)
@@ -586,6 +732,12 @@ async def save(client: Client, message: Message):
                 try:
                     sent = await copy_public_message(client, message, target, msgid, dest_chat)
                 except Exception as e:
+                    if _is_flood(e) and _flood_seconds(e) > 90:
+                        stop_reason = explain_error(e)
+                        notified = True
+                        if not dest_chat:
+                            await message.reply_text(f"<b>⏳ Telegram Flood Wait</b>\n<i>Please try again in {fmt_wait(_flood_seconds(e))}.</i>", parse_mode=enums.ParseMode.HTML)
+                        break
                     kind_ = dest_error_kind(e) if dest_chat else None
                     if kind_ == "fatal":
                         stop_reason = explain_error(e)
@@ -623,29 +775,20 @@ async def save(client: Client, message: Message):
                 stop_reason = "Login required to read this content. Use /login."
                 break
             try:
-                acc = Client(
-                    "saverestricted",
-                    session_string=user_data,
-                    api_hash=API_HASH,
-                    api_id=API_ID,
-                    in_memory=True,
-                    max_concurrent_transmissions=20  # Turbo: more parallel chunks for private-channel down/upload
-                )
-                await acc.connect()
-                await ensure_account_me(acc, user_data)
+                acc = await get_account(uid, user_data)     # reused connection (no new session per message)
             except Exception as e:
                 await message.reply(f"<b>❌ Authentication Failed</b>\n\n<i>Your session may have expired. Please /logout and /login again.</i>\n<code>{e}</code>", parse_mode=enums.ParseMode.HTML)
                 notified = True
                 stop_reason = "Your login session is not valid. Use /logout and /login again."
                 break
-            result = await handle_restricted_content(
-                client, acc, message, target, msgid, dest_chat, errors,
-                as_user=as_user_mode, copy_first=(as_user_mode and is_public_link)
-            )
+            mark_account(uid, True)
             try:
-                await acc.disconnect()
-            except Exception:
-                pass
+                result = await handle_restricted_content(
+                    client, acc, message, target, msgid, dest_chat, errors,
+                    as_user=as_user_mode, copy_first=(as_user_mode and is_public_link)
+                )
+            finally:
+                mark_account(uid, False)
             if result is True:
                 delivered += 1
             elif result in ("notified", "failed"):
@@ -655,6 +798,8 @@ async def save(client: Client, message: Message):
                 failed += 1
                 notified = True
                 stop_reason = errors[-1].split(": ", 1)[-1] if errors else "Stopped because of an error."
+                if "login session is no longer valid" in stop_reason:
+                    await drop_account(uid)     # dead session: do not keep the connection
                 break  # chat itself is not reachable / target cannot be written: stop instead of repeating the same error
             else:
                 skipped += 1
@@ -767,10 +912,13 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
     if not msg_type:
         return
     if actor == "user":
-        try:
-            await acc.get_chat(dest_id)     # lets the account's session know the target chat before it posts
-        except Exception:
-            pass
+        known = acc.__dict__.setdefault("_nawaab_known_chats", set())
+        if dest_id not in known:
+            try:
+                await acc.get_chat(dest_id)     # lets the account's session know the target chat before it posts
+                known.add(dest_id)
+            except Exception:
+                pass
     if copy_first and actor == "user":
         # public chat + As User: a direct copy by the account is the fastest "forward"
         try:
@@ -816,12 +964,26 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
     try:
         asyncio.create_task(downstatus(client, f'{message.id}downstatus.txt', smsg, message.chat.id))
        
-        file = await acc.download_media(
-            msg,
-            file_name=f"{temp_dir}/",
-            progress=progress,
-            progress_args=[message, "down"]
-        )
+        file = None
+        for _attempt in (1, 2):
+            try:
+                file = await acc.download_media(
+                    msg,
+                    file_name=f"{temp_dir}/",
+                    progress=progress,
+                    progress_args=[message, "down"]
+                )
+                break
+            except Exception as dl_err:
+                # a short Telegram flood wait: wait it out once and continue automatically
+                if _is_flood(dl_err) and _attempt == 1 and _flood_seconds(dl_err) <= 90:
+                    try:
+                        await smsg.edit(f"<b>⏳ Telegram asked to wait {fmt_wait(_flood_seconds(dl_err))}.</b>\n<i>Continuing automatically...</i>", parse_mode=enums.ParseMode.HTML)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(_flood_seconds(dl_err) + 1)
+                    continue
+                raise
        
         if os.path.exists(f'{message.id}downstatus.txt'): os.remove(f'{message.id}downstatus.txt')
     except Exception as e:
@@ -829,6 +991,26 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
             if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
             await smsg.edit("❌ **Task Cancelled**")
             return "notified"
+        if _is_flood(e):
+            # a long flood wait: stop the whole task ONCE with a clear message (not one error per message)
+            wait_txt = fmt_wait(_flood_seconds(e))
+            logger.error(f"Download flood wait ({wait_txt}) on message {msgid}: {e}")
+            if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
+            _note(f"Telegram flood wait: try again in {wait_txt}.")
+            cross_dc = "ExportAuthorization" in str(e)
+            try:
+                await smsg.edit(
+                    "<b>⏳ Telegram Flood Wait</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"<i>Telegram limited your account's downloads for</i> <b>{wait_txt}</b>"
+                    + ("<i> (downloading from another Telegram data center).</i>" if cross_dc else ".")
+                    + "\n\n<i>The task was stopped so it does not repeat the same error. "
+                    "Please try again after that time. Smaller batches avoid this.</i>",
+                    parse_mode=enums.ParseMode.HTML
+                )
+            except Exception:
+                pass
+            return False
         # do not fail silently: tell the user why the download did not work
         logger.error(f"Download failed for message {msgid}: {type(e).__name__}: {e}", exc_info=True)
         _note("Download failed: " + explain_error(e, "user"))
@@ -870,22 +1052,29 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
                 except Exception:
                     _cap_html = _html.escape(str(msg.caption))
                 final_caption += f"\n\n{_cap_html}"
-        if msg_type == "Document":
-            await sender.send_document(dest_id, file, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
-        elif msg_type == "Video":
-            await sender.send_video(dest_id, file, duration=msg.video.duration, width=msg.video.width, height=msg.video.height, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
-        elif msg_type == "Audio":
-            await sender.send_audio(dest_id, file, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
-        elif msg_type == "Photo":
-            await sender.send_photo(dest_id, file, caption=final_caption)
-        elif msg_type == "Voice":
-            await sender.send_voice(dest_id, file, duration=msg.voice.duration or 0, caption=final_caption, progress=progress, progress_args=[message, "up"])
-        elif msg_type == "VideoNote":
-            await sender.send_video_note(dest_id, file, duration=msg.video_note.duration or 0, length=msg.video_note.length or 240, thumb=ph_path, progress=progress, progress_args=[message, "up"])
-        elif msg_type == "Animation":
-            await sender.send_animation(dest_id, file, duration=msg.animation.duration or 0, width=msg.animation.width or 0, height=msg.animation.height or 0, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"])
-        elif msg_type == "Sticker":
-            await sender.send_sticker(dest_id, file)
+        async def do_send(snd, cid, **kw):
+            if msg_type == "Document":
+                return await snd.send_document(cid, file, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"], **kw)
+            elif msg_type == "Video":
+                return await snd.send_video(cid, file, duration=msg.video.duration, width=msg.video.width, height=msg.video.height, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"], **kw)
+            elif msg_type == "Audio":
+                return await snd.send_audio(cid, file, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"], **kw)
+            elif msg_type == "Photo":
+                return await snd.send_photo(cid, file, caption=final_caption, **kw)
+            elif msg_type == "Voice":
+                return await snd.send_voice(cid, file, duration=msg.voice.duration or 0, caption=final_caption, progress=progress, progress_args=[message, "up"], **kw)
+            elif msg_type == "VideoNote":
+                return await snd.send_video_note(cid, file, duration=msg.video_note.duration or 0, length=msg.video_note.length or 240, thumb=ph_path, progress=progress, progress_args=[message, "up"], **kw)
+            elif msg_type == "Animation":
+                return await snd.send_animation(cid, file, duration=msg.animation.duration or 0, width=msg.animation.width or 0, height=msg.animation.height or 0, thumb=ph_path, caption=final_caption, progress=progress, progress_args=[message, "up"], **kw)
+            elif msg_type == "Sticker":
+                return await snd.send_sticker(cid, file, **kw)
+        delivered_by_copy = False
+        if actor == "user" and msg_type in FILE_MEDIA_ATTR:
+            # As User: the bot uploads here, the account copies it into the target chat, the bot's copy is auto-deleted
+            delivered_by_copy = await upload_by_bot_then_copy(client, acc, message, dest_id, do_send, msg_type)
+        if not delivered_by_copy:
+            await do_send(sender, dest_id)
         uploaded = True
        
     except Exception as e:
@@ -913,6 +1102,8 @@ async def handle_restricted_content(client: Client, acc, message: Message, chat_
         pass
     if dest and dest_error_kind(upload_error, True) == "fatal":
         return False
+    if _is_flood(upload_error) and _flood_seconds(upload_error) > 90:
+        return False      # long flood wait: stop instead of one error per message
     return "notified"
 @Client.on_callback_query()
 async def button_callbacks(client: Client, callback_query: CallbackQuery):
